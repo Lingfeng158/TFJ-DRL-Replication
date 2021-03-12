@@ -20,9 +20,9 @@ This document is divided into 9 parts:
 0. Developement Environment
 1. Data used in model and data acquisition
 2. Data preprocessing
-3. RNN model definition
+3. RNN model and Temporal Attention Mechanism definition
 4. Reinforcement model definition
-5. Loss function design
+5. Utility functions, and Loss function
 6. Model training and weight selection
 7. Model performance testing
 8. Link to paper and other resources
@@ -235,6 +235,243 @@ class StockDataset(Dataset):
     def getDS(self):
         return self.X, self.y, self.z, self.zp
 ```
+
+## RNN model and Temporal Attention Mechanism definition
+
+The overview of Supervised Learning part is as follows:
+![Illustration of SL part of TFJ-DRL](./src/SLFig.png)
+
+
+The Supervised Learning part uses Gated Recurrent Unit, and it can be easily defined:
+```
+#define GRU class
+#init parameter: env_size for RL algorithm
+class GRU(nn.Module):
+    def __init__(self, env_size):
+        super(GRU, self).__init__()
+        self.rnn=nn.GRU(
+            input_size=86,
+            hidden_size=128,
+            num_layers=1,
+            batch_first=True
+        )
+        self.num_layers=1
+        ...
+
+    def begin_state(self, device, batch_size=1): 
+        # `nn.GRU` takes a tensor as hidden state
+        return torch.zeros((
+                    self.rnn.num_layers, batch_size, 128), device=device)
+
+    ...
+```
+
+However, the forward function is slightly different. On top of each GRU's output at each time step t, there is a Temporal Attention Mechanism that tries to find the similarity between GRU time t's output and all previous timesteps' output from time 0. This is achieved by computing all previous timestep's SoftMax with time t's output and summed into a weighted vector of same length as GRU's output. 
+
+```
+#temporal attention mechanism calculation
+def tam(states, device):
+    """
+    Given $states: batch_size, time_step, hidden_size
+    return $output states: batch_size, time_step, hidden_size*2
+    """
+    with torch.no_grad():
+        b_size, t_step, h_size=states.shape
+        # $time_step 0 
+        vec_list=torch.tensor(np.zeros([b_size, 1, h_size]).astype('float32')).to(device)
+        
+        #i: time step from 1 to $time_step
+        for i in range(1,states.shape[1]):
+            batchedCum=torch.tensor(np.zeros([b_size, 1,1]).astype('float32')).to(device)
+            batch_list=[]
+            vec=torch.tensor(np.zeros([b_size, 1, h_size]).astype('float32')).to(device)
+            for j in range(i):
+                batched=torch.exp(torch.tanh(
+                    torch.bmm(states[:,i:i+1,:], 
+                              torch.transpose(states[:,j:j+1,:], 1, 2))))
+                batch_list.append(batched)
+                batchedCum+=batched
+            for j in range(i):
+                vec+=torch.bmm((batch_list[j]/batchedCum), states[:, j:j+1, :])
+            vec_list=torch.cat([vec_list,vec], axis=1)
+        #result=torch.cat([states, vec_list],axis=2)
+    return vec_list
+```
+
+Also, on top of the whole structure, there are 2 stacked linear layers trying to predict the price of time t+1. It basically serves as the decoder to the environment. So the rest of the initialization function and the forward function can be defined as follow:
+
+```
+#define GRU class
+#init parameter: env_size for RL algorithm
+class GRU(nn.Module):
+    def __init__(self, env_size):
+    	...
+        self.linear1=nn.Linear(256, env_size)
+        self.linear2=nn.Linear(env_size, 1)
+
+	...
+        
+    def forward(self, x, state, device):
+        batch_size,timestep, _=x.shape
+        states, state=self.rnn(x, state)
+        tamVec=tam(states, device)
+        
+        #concatVec: batch_size, time_step, hidden_size*2
+        #i.e.       batch_size, 24       , 256        
+        concatVec=torch.cat([states, tamVec],axis=2)
+        envVec=self.linear1(torch.tanh(concatVec.reshape(batch_size*timestep, -1)))
+        output=nn.Dropout(p=0.3)(envVec)
+        output=nn.ReLU()(output)
+        output=self.linear2(output)
+        envVec=envVec.reshape(batch_size, timestep, -1)
+        return (output.view(batch_size, -1), envVec), state
+```
+## Reinforcement model definition
+
+The overview of Reinforcement Learning part is as follows:
+![Illustration of RL part of TFJ-DRL](./src/RLFig.png)
+
+The Reinforcement model is fairly easy to define, since it is a special case of reinforcement learning. We can simply use RNN cells from pytorch. RL policy outputs 3 logits representing {Short, Neutral, Long}/
+```
+#RL Policy net modeled by parameters
+class rlPolicy(nn.Module):
+    def __init__(self, env_size, device):
+        super(rlPolicy, self).__init__()
+        self.rnn=GRU(env_size)
+        self.rl=nn.RNN(
+            input_size=env_size,
+            hidden_size=128,
+            num_layers=1,
+            batch_first=True
+        )
+        self.linear=nn.Sequential(nn.BatchNorm1d(128), nn.ReLU(),nn.Dropout(0.3),
+                                  nn.Linear(128, 32), nn.ReLU(),nn.Dropout(0.3),
+                                  nn.Linear(32, 3))
+        self.device=device
+
+    #predP: predicition of t+1 closing prce
+    #output: actions from -1 to 1 in shape (`batch_size`, `num_steps`)
+    def forward(self, x, state):  
+        batch_size,timestep, _=x.shape  
+        (predP, envVec), state1=self.rnn(x, state[0], self.device)
+        output, state2=self.rl(envVec, state[1])
+        output=self.linear(output.reshape(batch_size*timestep, -1))
+        #predP: price prediction of t+1, output: (batch, timestep, 128) of actions
+        return predP, output.view(batch_size,timestep, -1)
+    
+    def begin_state(self, device, batch_size=1): 
+        # `nn.GRU` takes a tensor as hidden state
+        return [self.rnn.begin_state(device, batch_size),
+                self.rnn.begin_state(device, batch_size)]
+```
+
+## Utility functions, and Loss function
+
+Tell pyTorch to use CPU, if GPU is not found:
+```
+#define device
+def try_gpu(i=0):
+    """Return gpu(i) if exists, otherwise return cpu()."""
+    if torch.cuda.device_count() >= i + 1:
+        return torch.device(f'cuda:{i}')
+    return torch.device('cpu')
+```
+
+Gradient Clipping prevents gradient from exploding during training:
+
+```
+#Prevent exploding gradient
+def grad_clipping(net, theta): 
+    """Clip the gradient."""
+    if isinstance(net, nn.Module):
+        params = [p for p in net.parameters() if p.requires_grad]
+    else:
+        params = net.params
+    norm = torch.sqrt(sum(torch.sum((p.grad ** 2)) for p in params))
+    if norm > theta:
+        for param in params:
+            param.grad[:] *= theta / norm
+```
+
+Weight Initialization for linear layers:
+```
+#model weight initialization
+def init_weights(m):
+    if type(m) == nn.Linear or type(m) == nn.Conv2d:
+        torch.nn.init.xavier_normal_(m.weight)
+        m.bias.data.normal_(0.0,0.01)
+```
+
+Utility calculation for Reinforcement Learning. Here, it is calculated as the sum of price difference *z* multiplied by the trading action *a* from time 0 to time t. I.e. if at time t, *z* is negative (price decreased during the day), but the predicted action *a* is **long**, then Utility will record a loss of *za*; if the predicted action is **short**, then the Utility will be a positive *za*; and if the predicted action is **Neutral**, then the utility is unchanged. 
+```
+#Calculate Utility based on policy Output
+#z: z from dataset
+#c: transaction cost
+def calcUtility(policyOutput, z, c=0.001):
+  with torch.no_grad():
+    discretize=policyOutput.detach()
+    batch, step, _=policyOutput.shape
+    #discretize: batch, step, 3
+    discretize=discretize.reshape(batch*step,-1)
+    discretize=torch.argmax(discretize, dim=1, keepdim=True) #{0, 1, 2}
+    discretize=discretize.reshape(batch, step)
+    preAction=torch.cat([discretize[:,0:1], discretize[:, :-1]], dim=1)
+    #net income R
+    R=z*(discretize-1)-c*((discretize-preAction)!=0)
+    U=torch.cumsum(R, dim=1)
+    return U, preAction
+```
+
+The Original Loss Function is as follows:
+![Illustration of loss function of TFJ-DRL](./src/LossEq.png)
+
+It has two terms:
+* Term 1a: inside the log function, it calculates the probability of choosing the same action as last step
+* Term 1b: The negative log function is modified by the total return until time t
+* Term 2: MSE(Pred Price, true Price), it calculates the difference between price prediction
+
+The original loss function is as follows:
+```
+#Loss function defined by paper
+def lossFunc(predP, y, policyOutput, z, device):
+    #MSE
+    term1=nn.MSELoss()(predP, y)
+    #RL
+    U, preAction=calcUtility(policyOutput, z)
+    U_detach=U.detach()
+    sfPolicyOutput=nn.Softmax(dim=2)(policyOutput)
+    actionProb=torch.squeeze(torch.gather(sfPolicyOutput, 2, torch.unsqueeze(preAction, -1)))
+    term2=-torch.log(actionProb)*U_detach
+    return term2.mean()+term1
+```
+
+The Term 1 works, because if Term 1b's Utility is large, but Term 1a's probability is small, then the whole Term 1 is extra large, meaning it punishes bad decisions. 
+
+However, the loss funtion does not encourage good actions, i.e. Term 1a is high, and Term 1b is also high. We can add a third term to do this and improve training and learning:
+
+* Term 3: CrossEntropyLoss(Predicted action, greedy action), the greedy action is just the optimal action at time t to maximize profits. 
+
+Thus the modified loss function is as follows:
+```
+#greedy loss function
+def lossFunc2(predP, y, policyOutput, z, device):
+    #MSE
+    term1=nn.MSELoss()(predP, y)
+    #RL
+    greedyAction=(z>=0.01)*2
+    one_hot=torch.nn.functional.one_hot(greedyAction)
+    U, preAction=calcUtility(policyOutput, z)
+    U_detach=U.detach()
+    sfPolicyOutput=nn.Softmax(dim=2)(policyOutput)
+    actionProb=torch.squeeze(torch.gather(sfPolicyOutput, 2, torch.unsqueeze(preAction, -1)))
+    term2=-torch.log(actionProb)*U_detach
+    term3=nn.CrossEntropyLoss()(policyOutput.view(-1, 3), greedyAction.view(-1))
+    return 0.5*term3+term2.mean()+term1
+```
+
+
+
+
 
 
 

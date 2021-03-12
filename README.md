@@ -15,8 +15,9 @@ Through this document, I'm going to detail the steps I took and decisions I made
 
 ## Content Overview
 
-This document is divided into 5 parts:
+This document is divided into 9 parts:
 
+0. Developement Environment
 1. Data used in model and data acquisition
 2. Data preprocessing
 3. RNN model definition
@@ -26,5 +27,29 @@ This document is divided into 5 parts:
 7. Model performance testing
 8. Link to paper and other resources
 
+## Development Environment
+
+The python packages used in the project include: PyTorch, TorchVision, Numpy, Pandas, MatplotLib, YFinance, Statsmodels and TA-Lib.
+
+YFinance, Statsmodels, and TA-Lib can be installed via:
+```
+conda install -c anaconda statsmodels
+conda install -c ranaroussi yfinance
+conda install -c quantopian ta-lib
+```
+
+On Google Colab, TA-Lib needs to be seperated installed via:
+```
+!wget http://prdownloads.sourceforge.net/ta-lib/ta-lib-0.4.0-src.tar.gz
+!tar -xzvf ta-lib-0.4.0-src.tar.gz
+%cd ta-lib
+!./configure --prefix=/usr
+!make
+!make install
+!pip install Ta-Lib
+```
+
 ## Data used in model and data acquisition
+
+
 

@@ -402,6 +402,46 @@ def init_weights(m):
         m.bias.data.normal_(0.0,0.01)
 ```
 
+We also need to define training, validation, testing dataset iterator generator:
+```
+#Generation of training, validation, and testing dataset
+def DataIterGen(stock_id, name_list, demo=False):
+    """
+    test_id_list: id of subjects for testing
+    val_id_list: id of subjects for validation
+    other subjects for training
+    full_list=get_data_set(name_list), preprocessed
+    demo: when demo mode is True, only test_iter is returned, with data from
+    first entry of test_id_list (single stock)
+    """
+    trainDS=StockDataset(stock_id, name_list, start="2013-01-01", end="2017-10-01")
+    #get high correlation list for validation and testing
+    hcl=trainDS.getHighCorrelationList()
+    if demo:
+      test_iter=DataLoader(StockDataset(stock_id, name_list, timestep=24, gap=1, 
+                                        start="2018-01-01", end="2019-01-01",
+                                        use_external_list=True, external_list=hcl), 
+                           shuffle=False, batch_size=64, num_workers=0)
+      
+      #get abs change in stock closing price:
+      data=get_data(name_list[stock_id], start="2018-01-01", end="2019-01-01")
+      delta=data.iloc[-1]['Close']-data.iloc[91]['Close']
+      print(f'Demo Stock ticker: {name_list[stock_id]}, change in closing price during testing period: ${delta:.2f}')
+      return test_iter
+    else:
+      test_iter=DataLoader(StockDataset(stock_id, name_list, 
+                                        start="2018-01-01", end="2019-01-01",
+                                        use_external_list=True, external_list=hcl),
+                            batch_size=32, num_workers=0)
+      val_iter=DataLoader(StockDataset(stock_id, name_list,
+                                       start="2017-07-01", end="2018-04-01",
+                                       use_external_list=True, external_list=hcl),
+                           batch_size=32, num_workers=0)
+      train_iter=DataLoader(trainDS, shuffle=True, batch_size=32, num_workers=0)
+      print(f'Stock ticker: {name_list[stock_id]}')
+      return train_iter, val_iter, test_iter
+```
+
 Utility calculation for Reinforcement Learning. Here, it is calculated as the sum of price difference *z* multiplied by the trading action *a* from time 0 to time t. I.e. if at time t, *z* is negative (price decreased during the day), but the predicted action *a* is **long**, then Utility will record a loss of *za*; if the predicted action is **short**, then the Utility will be a positive *za*; and if the predicted action is **Neutral**, then the utility is unchanged. 
 ```
 #Calculate Utility based on policy Output
@@ -469,9 +509,166 @@ def lossFunc2(predP, y, policyOutput, z, device):
     return 0.5*term3+term2.mean()+term1
 ```
 
+## Model training and weight selection
+
+Next up, we define code to train an epoch:
+```
+#trainer for epoch
+def train_epoch(net, train_iter, device, optimizer, lossfn):
+    loss_data=[]
+    with torch.autograd.set_detect_anomaly(True):
+        for X, y, z, _ in train_iter:
+            #reset state for each batch
+            state=net.begin_state(batch_size=X.shape[0], device=device)
+        
+            #move to device
+            X, y, z=X.to(device), y.to(device), z.to(device)
+            predP, output=net(X, state)
+            loss=lossfn(predP, y, output,z, device)
+            optimizer.zero_grad()
+            loss.backward()
+            grad_clipping(net, 1)
+            optimizer.step()
+            loss_data.append(loss.item())
+    return np.array(loss_data).mean(), loss_data
+```
+
+As well as code for evaluation. The *prediction* function returns the evaluation set's average loss and average total Utility for weight selection:
+```
+#Testing on trained model
+def prediction(net, eval_iter, device, lossfn):
+    net.eval()
+    loss_list=[]
+    U_list=[]
+    with torch.no_grad():
+        for X, y, z, _ in eval_iter:
+            X, y, z = X.to(device), y.to(device), z.to(device)
+            state=net.begin_state(batch_size=X.shape[0], device=device)
+            predP, output=net(X, state)
+            loss=lossfn(predP, y, output, z, device)
+            U, _=calcUtility(output, z)
+            loss_list.append(loss.cpu().numpy())
+            U_list.append(U[:, -1].mean().cpu().numpy())
+    return np.array(loss_list).mean(), np.array(U_list).mean()
+```
+
+Finally, we can piece all parts together and get the *train* function. It has a learning rate scheduler that decreases learning rate by 0.05 after every epoch, and at then end of each epoch, the model weight is saved, and tested on the validation sets. At the end of training session, training loss and validation Utility is plotted for weight selection:
+
+```
+#Trainer 
+#Incoporated learning rate scheduler
+#Avg training loss & Avg validation Utility gain is recorded on epoch basis
+#Loss and Utility by epoch are plotted at the end of training
+def train(net, train_iter, eval_iter, optimizer, device, num_epoch, name, lossfn=lossFunc):
+    loss_data=[]
+    U_data=[]
+    net.apply(init_weights)
+    net.to(device)
+    scheduler = optim.lr_scheduler.ExponentialLR(optimizer, 0.95, last_epoch=-1)
+    
+    for epoch in range(num_epoch):
+        net.train()
+        lossEpoch, lossEpoch_list=train_epoch(net, train_iter, device, optimizer, lossfn=lossfn)   
+        loss_v, U_v=prediction(net, eval_iter, device, lossfn=lossfn)
+        loss_data.append(lossEpoch)  
+        U_data.append(U_v)
+        print(f'Epoch {epoch}, training loss: {lossEpoch:.2f}, val utility: {U_v:.2f}')
+        torch.save(net.state_dict(), os.path.join('./model_weights', f'{name}-epoch-{epoch}.pth'))
+        scheduler.step()
+    
+    #plot loss & Utility
+    fig, ax_left = plt.subplots(figsize=(10,4))
+    ax_right = ax_left.twinx()
+    ax_left.plot(loss_data, label = "Loss", color='blue')
+    ax_right.plot(U_data, label = "Utility", color='red')
+    ax_left.set_xlabel('Time Step')
+    ax_right.set_ylabel('Loss y axis')
+    ax_right.set_ylabel('Utility y axis')
+    ax_left.set_title('Loss and Utility')
+    ax_left.legend()
+    ax_right.legend()
+    return loss_data
+```
+
+The *test* function is basically a copy of *prediction* function, with the ability to dictate which set of weights to use:
+```
+def test(net, test_iter, device, epoch, name):
+    net.eval()
+    net.load_state_dict(torch.load(os.path.join('./model_weights', f'{name}-epoch-{epoch}.pth')))
+    device=try_gpu()
+    net.to(device)
+    U_list=[]
+    with torch.no_grad():
+        for X, _, _, zp in test_iter:
+            X, zp = X.to(device),  zp.to(device)
+            state=net.begin_state(batch_size=X.shape[0], device=device)
+            predP, output=net(X, state)
+            U, _=calcUtility(output, zp)
+            U_list.append(U[:, -1].mean().cpu().numpy())
+    return np.array(U_list).mean()
+```
+At the end of training, it will generate something like this:
+![Example of end of training session](./src/TrainExp.png)
 
 
+## Model performance testing
 
+Ideally, if we want to predict actions for 30 days starting at day t, we could train the model with some historical data immediately before day t to adapt to the market as closely as possible.
+
+But For the convenience of evaluation, we will only train the model once, and use it to test on a longer time frame. So for testing, given a stock ticker, the model is fit with data Mar 2013 - Oct 2017, validated with data from Oct 2017 - Mar 2018, and tested on data Apr 2018 - Dec 2018. 
+
+
+In real life, all historical data are fed into model, and we try to get current predicted action from the model. So to mimic real world use, to predict action for day t, 24-day data from t-25 to t-1 is inputted to the model, and only the action prediction of last timestep is considered as the action for day t. This also ensures that no information is leaked from future to day t. So for example, if we want to make action prediction for a 30 day period , 30 sets of 24-day data are inputted to the model, each offset by 1 day, and only the last action and reward generated from that action is recorded from each set. 
+
+We will need to seperately define a function to achieve this:
+```
+def demo(net, demo_iter, device, epoch, name):
+    net.eval()
+    net.load_state_dict(torch.load(os.path.join('./model_weights', f'{name}-epoch-{epoch}.pth')))
+    device=try_gpu()
+    net.to(device)
+    reward=np.array([])
+    with torch.no_grad():
+        for X, _, _, zp in demo_iter:
+          X, zp = X.to(device),  zp.to(device)
+          state=net.begin_state(batch_size=X.shape[0], device=device)
+          predP, output=net(X, state)
+          discretizedAction=((output>=0)*2-1)
+          batchReward=discretizedAction*zp
+          reward=np.concatenate((reward,batchReward[:,-1].reshape(-1).cpu().numpy()))
+        result = [sum(reward[ : i + 1]) for i in range(len(reward))] 
+    fig, ax_left = plt.subplots(figsize=(20,3))
+    ax_left.plot(result, label = "Stock Gain", color='blue')
+    ax_left.set_xlabel('Time Step')
+    ax_left.set_ylabel('Cumulative Gain')
+    ax_left.set_title('Demonstration of Algorithm')
+    ax_left.legend()
+    return
+```
+
+I train the model and run some tests on some sample stocks. I will show the price difference during the same period of time for the stock as a reference and plot the cumulative gain of algorithm across the same time span.
+
+Stock for COO:
+![Example of COO](./src/COO.png)
+
+Stock for COF:
+![Example of COF](./src/COF.png)
+
+Stock for ABBV:
+![Example of ABBV](./src/ABBV.png)
+
+Stock for CCL:
+![Example of CCL](./src/CCL.png)
+
+Stock for GOOG:
+![Example of GOOG](./src/GOOG.png)
+
+## Link to paper and other resources
+
+The original paper can be found [here](./src/ReferencePaper.pdf)
+Full implementation can be found [here](./src/Project_2_One_Hot.ipynb)
+Tanh version of the implementation can be found [here](./src/Project_2_Tanh.ipynb)
+Can we train one model and use on all stock? Find notes and implementations [here](./src/oneModel4all/README.md)
 
 
 

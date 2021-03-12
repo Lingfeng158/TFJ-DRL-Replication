@@ -664,7 +664,7 @@ Stock for CCL:
 Stock for GOOG:
 ![Example of GOOG](./src/GOOG.png)
 
-We can see that the trading algorithm works quite well! Even when the stock prices' are falling, i.e. COF, ABBV, CCL, the algorithm can bring some profit or reduce the loss, and when the stock prices increase, the algorithm can yield more profits!
+We can see that the trading algorithm works quite well! Even when the stock prices' are falling, i.e. COF, ABBV, CCL, GOOG, the algorithm can bring in some profit or reduce the loss.  And when the stock prices increase, the algorithm can yield even more profit!
 
 ## Link to paper and other resources
 

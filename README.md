@@ -608,7 +608,7 @@ def test(net, test_iter, device, epoch, name):
     return np.array(U_list).mean()
 ```
 At the end of training, it will generate something like this:
-![Example of end of training session](./src/TrainExp.png)
+![Example of end of training session](./src/TrainingExp.png)
 
 
 ## Model performance testing
@@ -666,8 +666,11 @@ Stock for GOOG:
 ## Link to paper and other resources
 
 The original paper can be found [here](./src/ReferencePaper.pdf)
+
 Full implementation can be found [here](./src/Project_2_One_Hot.ipynb)
+
 Tanh version of the implementation can be found [here](./src/Project_2_Tanh.ipynb)
+
 Can we train one model and use on all stock? Find notes and implementations [here](./src/oneModel4all/README.md)
 
 

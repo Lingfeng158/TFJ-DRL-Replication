@@ -22,7 +22,7 @@ This document is divided into 9 parts:
 2. Data preprocessing
 3. RNN model and Temporal Attention Mechanism definition
 4. Reinforcement model definition
-5. Utility functions, and Loss function
+5. Helper functions, Utility function, and Loss function
 6. Model training and weight selection
 7. Model performance testing
 8. Link to paper and other resources
@@ -365,7 +365,7 @@ class rlPolicy(nn.Module):
                 self.rnn.begin_state(device, batch_size)]
 ```
 
-## Utility functions, and Loss function
+## Helper functions, Utility function, and Loss function
 
 Tell pyTorch to use CPU, if GPU is not found:
 ```
@@ -617,8 +617,9 @@ Ideally, if we want to predict actions for 30 days starting at day t, we could t
 
 But For the convenience of evaluation, we will only train the model once, and use it to test on a longer time frame. So for testing, given a stock ticker, the model is fit with data Mar 2013 - Oct 2017, validated with data from Oct 2017 - Mar 2018, and tested on data Apr 2018 - Dec 2018. 
 
+In real life, all historical data are fed into model, and we try to get current predicted action from the model. So to mimic real world use, to predict action for day t, 24-day data from t-25 to t-1 is inputted to the model, and only the action prediction of last timestep is considered as the action for day t. 
 
-In real life, all historical data are fed into model, and we try to get current predicted action from the model. So to mimic real world use, to predict action for day t, 24-day data from t-25 to t-1 is inputted to the model, and only the action prediction of last timestep is considered as the action for day t. This also ensures that no information is leaked from future to day t. So for example, if we want to make action prediction for a 30 day period , 30 sets of 24-day data are inputted to the model, each offset by 1 day, and only the last action and reward generated from that action is recorded from each set. 
+This also ensures that no information is leaked from future to day t. So for example, if we want to make action prediction for a 30 day period , 30 sets of 24-day data are inputted to the model, each offset by 1 day, and only the last action and reward generated from that action is recorded from each set. 
 
 We will need to seperately define a function to achieve this:
 ```
@@ -662,6 +663,8 @@ Stock for CCL:
 
 Stock for GOOG:
 ![Example of GOOG](./src/GOOG.png)
+
+We can see that the trading algorithm works quite well! Even when the stock prices' are falling, i.e. COF, ABBV, CCL, the algorithm can bring some profit or reduce the loss, and when the stock prices increase, the algorithm can yield more profits!
 
 ## Link to paper and other resources
 
